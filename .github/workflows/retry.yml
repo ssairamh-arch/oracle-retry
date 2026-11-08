@@ -27,25 +27,28 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
-      - name: Retry for about 5 hours, trying every 5 minutes
+      - name: Retry for about 5 hours
         id: loop
         run: |
           set -u
           end=$(( $(date +%s) + 5*3600 + 1800 ))
           while [ "$(date +%s)" -lt "$end" ]; do
+            wait_s=300
+            set +e
             existing=$(oci compute instance list --compartment-id "$COMPARTMENT" --display-name clip-render \
-              --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
-            if [ "${existing:-0}" != "0" ]; then
+              --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output 2>/dev/null)
+            set -e
+            if [ -n "${existing:-}" ] && [ "${existing}" != "0" ]; then
               echo "clip-render exists - disabling this workflow."
               gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
               echo "done=1" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            AD=$(oci iam availability-domain list --compartment-id "$COMPARTMENT" --query 'data[0].name' --raw-output)
+            set +e
+            AD=$(oci iam availability-domain list --compartment-id "$COMPARTMENT" --query 'data[0].name' --raw-output 2>/dev/null)
             IMAGE=$(oci compute image list --compartment-id "$COMPARTMENT" --operating-system "Canonical Ubuntu" \
               --operating-system-version "24.04" --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
-              --query 'data[0].id' --raw-output)
-            set +e
+              --query 'data[0].id' --raw-output 2>/dev/null)
             out=$(oci compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$AD" \
               --display-name clip-render --shape VM.Standard.A1.Flex \
               --shape-config '{"ocpus":2,"memoryInGBs":12}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
@@ -58,11 +61,16 @@ jobs:
               echo "done=1" >> "$GITHUB_OUTPUT"
               exit 0
             elif echo "$out" | grep -qi "capacity"; then
-              echo "$(date -u +%H:%M) Out of capacity - trying again in 5 minutes."
+              echo "$(date -u +%H:%M) Out of capacity - trying again later."
+            elif echo "$out" | grep -qE "429|TooManyRequests"; then
+              echo "$(date -u +%H:%M) Oracle rate limit (429) - waiting longer."
+              wait_s=900
             else
-              echo "$out" | grep -v -i "key" ; exit 1
+              echo "$(date -u +%H:%M) Unexpected error:"
+              echo "$out" | grep -E '"(status|code|message)"' | head -5
+              wait_s=600
             fi
-            sleep 300
+            sleep "$wait_s"
           done
       - name: Start the next round
         if: ${{ steps.loop.outputs.done != '1' && !cancelled() }}
