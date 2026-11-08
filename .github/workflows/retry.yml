@@ -11,6 +11,7 @@ jobs:
   launch:
     runs-on: ubuntu-latest
     permissions:
+      contents: read   # lets the job read this private repo
       actions: write   # lets the job switch itself off once the server exists
     env:
       OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
