@@ -2,7 +2,7 @@ name: Create clip-render (retry until Oracle has capacity)
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes
+    - cron: "7,22,37,52 * * * *"   # every 15 minutes, off the busy :00/:30 marks
   workflow_dispatch: {}
 
 concurrency: retry
@@ -50,7 +50,7 @@ jobs:
             echo "Launched clip-render."
             gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
           elif echo "$out" | grep -qi "capacity"; then
-            echo "Out of capacity - will try again in 10 minutes."
+            echo "Out of capacity - will try again in 15 minutes."
           else
             echo "$out" | grep -v -i "key" ; exit 1
           fi
