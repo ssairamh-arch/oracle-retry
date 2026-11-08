@@ -2,7 +2,7 @@ name: Create clip-render (retry until Oracle has capacity)
 
 on:
   schedule:
-    - cron: "7,22,37,52 * * * *"   # every 15 minutes, off the busy :00/:30 marks
+    - cron: "7,22,37,52 * * * *"   # backup trigger
   workflow_dispatch: {}
 
 concurrency: retry
@@ -10,9 +10,10 @@ concurrency: retry
 jobs:
   launch:
     runs-on: ubuntu-latest
+    timeout-minutes: 355
     permissions:
       contents: read   # lets the job read this private repo
-      actions: write   # lets the job switch itself off once the server exists
+      actions: write   # lets the job switch itself off, or restart itself
     env:
       OCI_CLI_USER: ${{ secrets.OCI_USER_OCID }}
       OCI_CLI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
@@ -26,31 +27,43 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install OCI CLI
         run: pip install --quiet oci-cli
-      - name: Launch if missing
+      - name: Retry for about 5 hours, trying every 5 minutes
+        id: loop
         run: |
           set -u
-          existing=$(oci compute instance list --compartment-id "$COMPARTMENT" --display-name clip-render \
-            --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
-          if [ "${existing:-0}" != "0" ]; then
-            echo "clip-render already exists - disabling this workflow."
-            gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
-            exit 0
-          fi
-          AD=$(oci iam availability-domain list --compartment-id "$COMPARTMENT" --query 'data[0].name' --raw-output)
-          IMAGE=$(oci compute image list --compartment-id "$COMPARTMENT" --operating-system "Canonical Ubuntu" \
-            --operating-system-version "24.04" --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
-            --query 'data[0].id' --raw-output)
-          set +e
-          out=$(oci compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$AD" \
-            --display-name clip-render --shape VM.Standard.A1.Flex \
-            --shape-config '{"ocpus":2,"memoryInGBs":12}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
-            --assign-public-ip true --ssh-authorized-keys-file ssh_public_key.pub 2>&1)
-          rc=$?
-          if [ $rc -eq 0 ]; then
-            echo "Launched clip-render."
-            gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
-          elif echo "$out" | grep -qi "capacity"; then
-            echo "Out of capacity - will try again in 15 minutes."
-          else
-            echo "$out" | grep -v -i "key" ; exit 1
-          fi
+          end=$(( $(date +%s) + 5*3600 + 1800 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            existing=$(oci compute instance list --compartment-id "$COMPARTMENT" --display-name clip-render \
+              --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output)
+            if [ "${existing:-0}" != "0" ]; then
+              echo "clip-render exists - disabling this workflow."
+              gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
+              echo "done=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            AD=$(oci iam availability-domain list --compartment-id "$COMPARTMENT" --query 'data[0].name' --raw-output)
+            IMAGE=$(oci compute image list --compartment-id "$COMPARTMENT" --operating-system "Canonical Ubuntu" \
+              --operating-system-version "24.04" --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
+              --query 'data[0].id' --raw-output)
+            set +e
+            out=$(oci compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$AD" \
+              --display-name clip-render --shape VM.Standard.A1.Flex \
+              --shape-config '{"ocpus":2,"memoryInGBs":12}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
+              --assign-public-ip true --ssh-authorized-keys-file ssh_public_key.pub 2>&1)
+            rc=$?
+            set -e
+            if [ $rc -eq 0 ]; then
+              echo "Launched clip-render."
+              gh workflow disable retry.yml -R "$GITHUB_REPOSITORY"
+              echo "done=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif echo "$out" | grep -qi "capacity"; then
+              echo "$(date -u +%H:%M) Out of capacity - trying again in 5 minutes."
+            else
+              echo "$out" | grep -v -i "key" ; exit 1
+            fi
+            sleep 300
+          done
+      - name: Start the next round
+        if: ${{ steps.loop.outputs.done != '1' && !cancelled() }}
+        run: gh workflow run retry.yml -R "$GITHUB_REPOSITORY"
