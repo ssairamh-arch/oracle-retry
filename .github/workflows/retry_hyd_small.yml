@@ -1,0 +1,77 @@
+name: Create clip-small in Hyderabad (1 CPU / 6 GB, retry until Oracle has capacity)
+
+on:
+  schedule:
+    - cron: "17,32,47,2 * * * *"   # backup trigger
+  workflow_dispatch: {}
+
+concurrency: retry-hyd-small
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    permissions:
+      contents: read
+      actions: write   # lets the job switch itself off, or restart itself
+    env:
+      OCI_CLI_USER: ${{ secrets.OCI_HYD_USER_OCID }}
+      OCI_CLI_TENANCY: ${{ secrets.OCI_HYD_TENANCY_OCID }}
+      OCI_CLI_FINGERPRINT: ${{ secrets.OCI_HYD_FINGERPRINT }}
+      OCI_CLI_REGION: ${{ secrets.OCI_HYD_REGION }}
+      OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_HYD_PRIVATE_KEY }}
+      COMPARTMENT: ${{ secrets.OCI_HYD_COMPARTMENT_OCID }}
+      SUBNET: ${{ secrets.OCI_HYD_SUBNET_OCID }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCI CLI
+        run: pip install --quiet oci-cli
+      - name: Retry for about 5 hours
+        id: loop
+        run: |
+          set -u
+          end=$(( $(date +%s) + 5*3600 + 1800 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            wait_s=300
+            set +e
+            existing=$(oci compute instance list --compartment-id "$COMPARTMENT" --display-name clip-small \
+              --query 'data[?"lifecycle-state"!=`TERMINATED`] | length(@)' --raw-output 2>/dev/null)
+            set -e
+            if [ -n "${existing:-}" ] && [ "${existing}" != "0" ]; then
+              echo "clip-small exists - disabling this workflow."
+              gh workflow disable retry_hyd_small.yml -R "$GITHUB_REPOSITORY"
+              echo "done=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            set +e
+            AD=$(oci iam availability-domain list --compartment-id "$COMPARTMENT" --query 'data[0].name' --raw-output 2>/dev/null)
+            IMAGE=$(oci compute image list --compartment-id "$COMPARTMENT" --operating-system "Canonical Ubuntu" \
+              --operating-system-version "24.04" --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
+              --query 'data[0].id' --raw-output 2>/dev/null)
+            out=$(oci compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$AD" \
+              --display-name clip-small --shape VM.Standard.A1.Flex \
+              --shape-config '{"ocpus":1,"memoryInGBs":6}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
+              --assign-public-ip true --ssh-authorized-keys-file ssh_public_key.pub 2>&1)
+            rc=$?
+            set -e
+            if [ $rc -eq 0 ]; then
+              echo "Launched clip-small."
+              gh workflow disable retry_hyd_small.yml -R "$GITHUB_REPOSITORY"
+              echo "done=1" >> "$GITHUB_OUTPUT"
+              exit 0
+            elif echo "$out" | grep -qi "capacity"; then
+              echo "$(date -u +%H:%M) Out of capacity - trying again later."
+            elif echo "$out" | grep -qE "429|TooManyRequests"; then
+              echo "$(date -u +%H:%M) Oracle rate limit (429) - waiting longer."
+              wait_s=900
+            else
+              echo "$(date -u +%H:%M) Unexpected error:"
+              echo "$out" | grep -E '"(status|code|message)"' | head -5
+              wait_s=600
+            fi
+            sleep "$wait_s"
+          done
+      - name: Start the next round
+        if: ${{ steps.loop.outputs.done != '1' && !cancelled() }}
+        run: gh workflow run retry_hyd_small.yml -R "$GITHUB_REPOSITORY"
