@@ -51,7 +51,7 @@ jobs:
               --query 'data[0].id' --raw-output 2>/dev/null)
             out=$(oci compute instance launch --compartment-id "$COMPARTMENT" --availability-domain "$AD" \
               --display-name clip-render --shape VM.Standard.A1.Flex \
-              --shape-config '{"ocpus":2,"memoryInGBs":12}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
+              --shape-config '{"ocpus":1,"memoryInGBs":6}' --image-id "$IMAGE" --subnet-id "$SUBNET" \
               --assign-public-ip true --ssh-authorized-keys-file ssh_public_key.pub 2>&1)
             rc=$?
             set -e
